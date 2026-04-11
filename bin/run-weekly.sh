@@ -34,11 +34,26 @@ ln -sfn "$LOG" "$LOG_DIR/latest.log"
 find "$LOG_DIR" -name '*.log' -type f -mtime +30 -delete 2>/dev/null || true
 
 # Reap stale job-search-agent claude processes (see run-daily.sh for rationale).
+# macOS `ps -o etime=` format: [[DD-]HH:]MM:SS — parse in portable bash.
+parse_etime_to_seconds() {
+  local etime="$1" days=0 a b c h=0 m=0 s=0
+  if [[ "$etime" == *-* ]]; then days="${etime%%-*}"; etime="${etime#*-}"; fi
+  IFS=: read -r a b c <<< "$etime"
+  if [ -n "$c" ]; then h="$a"; m="$b"; s="$c"
+  elif [ -n "$b" ]; then h=0; m="$a"; s="$b"
+  else h=0; m=0; s="${a:-0}"
+  fi
+  h=$((10#${h:-0})); m=$((10#${m:-0})); s=$((10#${s:-0})); days=$((10#${days:-0}))
+  echo $((days * 86400 + h * 3600 + m * 60 + s))
+}
+
 while IFS= read -r stale_pid; do
   [ -z "$stale_pid" ] && continue
-  age_s=$(ps -p "$stale_pid" -o etimes= 2>/dev/null | tr -d ' ')
-  if [ -n "$age_s" ] && [ "$age_s" -gt 1800 ]; then
-    kill -9 "$stale_pid" 2>/dev/null && echo "Reaped stale claude PID $stale_pid (age ${age_s}s)" >> "$LOG_DIR/run-weekly-reaper.log"
+  etime_raw=$(ps -p "$stale_pid" -o etime= 2>/dev/null | tr -d ' ')
+  [ -z "$etime_raw" ] && continue
+  age_s=$(parse_etime_to_seconds "$etime_raw")
+  if [ "$age_s" -gt 1800 ] 2>/dev/null; then
+    kill -9 "$stale_pid" 2>/dev/null && echo "$(date '+%Y-%m-%d %H:%M:%S') Reaped stale claude PID $stale_pid (age ${age_s}s)" >> "$LOG_DIR/run-weekly-reaper.log"
   fi
 done < <(pgrep -f "claude.*--print.*--agent job-search-agent" 2>/dev/null || true)
 

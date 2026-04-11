@@ -54,23 +54,47 @@ ln -sfn "$LOG" "$LOG_DIR/latest.log"
 find "$LOG_DIR" -name '*.log' -type f -mtime +30 -delete 2>/dev/null || true
 
 # --- Reap stale job-search-agent claude processes --------------------------
-# If a previous run hung (e.g. due to Claude Code multi-instance session-state
-# contention — observed on 2026-04-11 with orphaned 5-day-old claude sessions
-# silently blocking new invocations), its claude child may still be alive.
-# Any such process older than 30 minutes is almost certainly stuck and will
-# block this run the same way. Kill it before we start.
+# If a previous run hung, its claude child may still be alive. Any such
+# process older than 30 minutes is almost certainly stuck and will block
+# this run behind whatever shared lock it's holding. Kill it before we start.
 #
-# We match on "--agent job-search-agent" which is unique enough to avoid
-# killing unrelated claude sessions (interactive shells, Claude Cowork, etc.).
+# We match on "--agent job-search-agent" which is narrow enough to leave
+# interactive claude sessions, Claude Cowork (--remote-control), and
+# unrelated agents untouched.
+#
+# macOS `ps -o etime=` outputs [[DD-]HH:]MM:SS. Portable bash parser below.
+# (Linux supports `etimes` in seconds, macOS does not — so we parse etime.)
+parse_etime_to_seconds() {
+  local etime="$1"
+  local days=0
+  if [[ "$etime" == *-* ]]; then
+    days="${etime%%-*}"
+    etime="${etime#*-}"
+  fi
+  local a b c h=0 m=0 s=0
+  IFS=: read -r a b c <<< "$etime"
+  if [ -n "$c" ]; then
+    h="$a"; m="$b"; s="$c"
+  elif [ -n "$b" ]; then
+    h=0; m="$a"; s="$b"
+  else
+    h=0; m=0; s="${a:-0}"
+  fi
+  # Strip any leading zeros to avoid octal interpretation
+  h=$((10#${h:-0})); m=$((10#${m:-0})); s=$((10#${s:-0})); days=$((10#${days:-0}))
+  echo $((days * 86400 + h * 3600 + m * 60 + s))
+}
+
 REAPED_COUNT=0
 while IFS= read -r stale_pid; do
   [ -z "$stale_pid" ] && continue
-  # macOS ps etimes returns elapsed seconds
-  age_s=$(ps -p "$stale_pid" -o etimes= 2>/dev/null | tr -d ' ')
-  if [ -n "$age_s" ] && [ "$age_s" -gt 1800 ]; then
+  etime_raw=$(ps -p "$stale_pid" -o etime= 2>/dev/null | tr -d ' ')
+  [ -z "$etime_raw" ] && continue
+  age_s=$(parse_etime_to_seconds "$etime_raw")
+  if [ "$age_s" -gt 1800 ] 2>/dev/null; then
     if kill -9 "$stale_pid" 2>/dev/null; then
       REAPED_COUNT=$((REAPED_COUNT + 1))
-      echo "Reaped stale claude PID $stale_pid (age ${age_s}s)" >> "$LOG_DIR/run-daily-reaper.log"
+      echo "$(date '+%Y-%m-%d %H:%M:%S') Reaped stale claude PID $stale_pid (age ${age_s}s)" >> "$LOG_DIR/run-daily-reaper.log"
     fi
   fi
 done < <(pgrep -f "claude.*--print.*--agent job-search-agent" 2>/dev/null || true)

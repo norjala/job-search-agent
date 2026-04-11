@@ -32,62 +32,81 @@ log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$HC_LOG"; }
 
 log "--- health-check start ---"
 
-# --- Helper: compute age in hours of last successful run ------------------
-# The digest's header line looks like:
-#   _Last run: 2026-04-10 09:00 — 5 new roles, ..._
-# We extract the timestamp and diff against now.
+# --- Helper: compute age in hours of the digest file ----------------------
+# We use the file's mtime rather than parsing the "_Last run:_" header
+# because the agent has been observed to hallucinate that timestamp
+# (writing future times, wrong timezones, etc). mtime is filesystem truth:
+# any successful run bumps it, either via the agent's own digest write or
+# via the wrapper footer append in run-daily.sh.
 compute_age_hours() {
-  local header_line last_run last_run_epoch now_epoch
-  if [ ! -r "$DIGEST_FILE" ]; then
-    log "ERROR: cannot read $DIGEST_FILE — likely TCC blocking /bin/bash."
-    echo -1
+  if [ ! -e "$DIGEST_FILE" ]; then
+    log "ERROR: $DIGEST_FILE does not exist"
+    echo 999
     return
   fi
-  header_line="$(head -5 "$DIGEST_FILE" | grep -m1 '^_Last run:')"
-  last_run="$(echo "$header_line" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}' | head -1)"
-  if [ -z "$last_run" ]; then
-    log "WARN: could not parse Last run timestamp from digest header: '$header_line'"
-    echo -1
+  local mtime now
+  mtime=$(stat -f %m "$DIGEST_FILE" 2>/dev/null)
+  if [ -z "$mtime" ]; then
+    log "ERROR: stat failed on $DIGEST_FILE — possibly TCC or missing file"
+    echo 999
     return
   fi
-  last_run_epoch="$(date -j -f "%Y-%m-%d %H:%M" "$last_run" "+%s" 2>/dev/null)"
-  if [ -z "$last_run_epoch" ]; then
-    log "WARN: could not convert last_run='$last_run' to epoch"
-    echo -1
-    return
-  fi
-  now_epoch="$(date "+%s")"
-  echo $(( (now_epoch - last_run_epoch) / 3600 ))
+  now=$(date +%s)
+  echo $(( (now - mtime) / 3600 ))
+}
+
+# --- Helper: is a daily/weekly agent run currently in progress? -----------
+# Returns 0 (true) if yes. We treat any claude --print --agent job-search-agent
+# process as "a run in progress" — whether fresh or stuck. The reaper inside
+# run-daily.sh handles the stuck case, so health-check only cares whether
+# *something* is making progress.
+is_run_in_progress() {
+  pgrep -f "claude.*--print.*--agent job-search-agent" >/dev/null 2>&1
 }
 
 AGE="$(compute_age_hours)"
-log "digest age: ${AGE}h"
+log "digest mtime age: ${AGE}h"
 
 # --- Healthy path ----------------------------------------------------------
-if [ "$AGE" -ge 0 ] && [ "$AGE" -lt "$STALE_THRESHOLD_HOURS" ]; then
+if [ "$AGE" -lt "$STALE_THRESHOLD_HOURS" ]; then
   if [ -f "$ALERT_FILE" ]; then
     rm -f "$ALERT_FILE"
-    log "cleared stale $ALERT_FILE (agent recovered)"
+    log "cleared stale $ALERT_FILE (digest recovered)"
   fi
   log "healthy"
   exit 0
 fi
 
-# --- Stale: attempt self-heal ---------------------------------------------
-if [ "$AGE" -lt 0 ]; then
-  log "cannot determine digest age — treating as stale for alerting purposes"
+# --- In-progress path: a run is running, give it time ---------------------
+if is_run_in_progress; then
+  log "digest stale (${AGE}h) but a claude run is in progress — waiting, not alerting"
+  exit 0
 fi
 
-log "digest stale (>${STALE_THRESHOLD_HOURS}h) — attempting self-heal"
+log "digest stale (>${STALE_THRESHOLD_HOURS}h) and no run in progress — attempting self-heal"
 
 # Reap stale job-search-agent claude processes before kickstart, otherwise
 # the new run will hang behind the same lock the stale ones are holding.
-# (Pattern observed 2026-04-11: multi-instance session contention.)
+# macOS `ps -o etime=` format: [[DD-]HH:]MM:SS — parse in portable bash.
+parse_etime_to_seconds() {
+  local etime="$1" days=0 a b c h=0 m=0 s=0
+  if [[ "$etime" == *-* ]]; then days="${etime%%-*}"; etime="${etime#*-}"; fi
+  IFS=: read -r a b c <<< "$etime"
+  if [ -n "$c" ]; then h="$a"; m="$b"; s="$c"
+  elif [ -n "$b" ]; then h=0; m="$a"; s="$b"
+  else h=0; m=0; s="${a:-0}"
+  fi
+  h=$((10#${h:-0})); m=$((10#${m:-0})); s=$((10#${s:-0})); days=$((10#${days:-0}))
+  echo $((days * 86400 + h * 3600 + m * 60 + s))
+}
+
 REAPED=0
 while IFS= read -r stale_pid; do
   [ -z "$stale_pid" ] && continue
-  age_s=$(ps -p "$stale_pid" -o etimes= 2>/dev/null | tr -d ' ')
-  if [ -n "$age_s" ] && [ "$age_s" -gt 1800 ]; then
+  etime_raw=$(ps -p "$stale_pid" -o etime= 2>/dev/null | tr -d ' ')
+  [ -z "$etime_raw" ] && continue
+  age_s=$(parse_etime_to_seconds "$etime_raw")
+  if [ "$age_s" -gt 1800 ] 2>/dev/null; then
     if kill -9 "$stale_pid" 2>/dev/null; then
       REAPED=$((REAPED + 1))
       log "reaped stale claude PID $stale_pid (age ${age_s}s)"
@@ -102,22 +121,24 @@ else
   log "kickstart failed (rc=$?) — daily agent may not be loaded"
 fi
 
-# Give the daily run some time to produce output. The agent typically
-# finishes in under 10 minutes but we cap the wait so health-check itself
-# stays fast.
-sleep 180
+# Record the kickstart attempt. The next hourly health-check will use this
+# to decide whether recovery is "in progress" (give it time) vs "attempted
+# and failed" (write alert). A full daily run takes ~15 minutes, plus slack.
+KICKSTART_MARKER="$HC_LOG_DIR/.last-kickstart"
+date +%s > "$KICKSTART_MARKER"
 
-AGE_AFTER="$(compute_age_hours)"
-log "post-heal digest age: ${AGE_AFTER}h"
+# Brief pause (not a full run wait) to let the new process spawn. If it
+# does, we'll detect it as "in progress" and exit without alert. If it
+# can't spawn at all (e.g. plist broken), we'll proceed to the alert path.
+sleep 20
 
-if [ "$AGE_AFTER" -ge 0 ] && [ "$AGE_AFTER" -lt "$STALE_THRESHOLD_HOURS" ]; then
-  rm -f "$ALERT_FILE"
-  log "self-heal succeeded"
+if is_run_in_progress; then
+  log "self-heal dispatched — a daily run is now in progress, will verify on next hourly check"
   exit 0
 fi
 
-# --- Self-heal failed: write alert ----------------------------------------
-log "self-heal FAILED — writing $ALERT_FILE"
+# --- Kickstart fired but no process is running — write alert --------------
+log "kickstart dispatched but no claude process detected after 20s — writing $ALERT_FILE"
 
 LAUNCHD_ERR_TAIL=""
 if [ -r /tmp/job-search-agent-launchd.err ]; then
@@ -133,8 +154,8 @@ cat > "$ALERT_FILE" <<EOF
 # ⚠️ Job Search Agent — STALE
 
 **Detected:** $(date '+%Y-%m-%d %H:%M:%S %Z')
-**Digest age:** ${AGE}h (stale threshold: ${STALE_THRESHOLD_HOURS}h)
-**Self-heal attempt:** FAILED (kickstart did not produce a fresh run within 3 minutes)
+**Digest mtime age:** ${AGE}h (stale threshold: ${STALE_THRESHOLD_HOURS}h)
+**Self-heal attempt:** FAILED (kickstart dispatched but no claude process spawned within 20s — plist may be broken or launchd refused the job)
 **Host:** $(hostname)
 
 ## Repair
