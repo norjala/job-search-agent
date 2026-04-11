@@ -78,7 +78,24 @@ if [ "$AGE" -lt 0 ]; then
   log "cannot determine digest age — treating as stale for alerting purposes"
 fi
 
-log "digest stale (>${STALE_THRESHOLD_HOURS}h) — attempting self-heal via launchctl kickstart"
+log "digest stale (>${STALE_THRESHOLD_HOURS}h) — attempting self-heal"
+
+# Reap stale job-search-agent claude processes before kickstart, otherwise
+# the new run will hang behind the same lock the stale ones are holding.
+# (Pattern observed 2026-04-11: multi-instance session contention.)
+REAPED=0
+while IFS= read -r stale_pid; do
+  [ -z "$stale_pid" ] && continue
+  age_s=$(ps -p "$stale_pid" -o etimes= 2>/dev/null | tr -d ' ')
+  if [ -n "$age_s" ] && [ "$age_s" -gt 1800 ]; then
+    if kill -9 "$stale_pid" 2>/dev/null; then
+      REAPED=$((REAPED + 1))
+      log "reaped stale claude PID $stale_pid (age ${age_s}s)"
+    fi
+  fi
+done < <(pgrep -f "claude.*--print.*--agent job-search-agent" 2>/dev/null || true)
+log "reaper killed $REAPED stale claude process(es)"
+
 if launchctl kickstart -k "gui/$UID/com.jaron.job-search-daily" >> "$HC_LOG" 2>&1; then
   log "kickstart dispatched"
 else

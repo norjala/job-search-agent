@@ -53,6 +53,28 @@ ln -sfn "$LOG" "$LOG_DIR/latest.log"
 # 30-day log retention.
 find "$LOG_DIR" -name '*.log' -type f -mtime +30 -delete 2>/dev/null || true
 
+# --- Reap stale job-search-agent claude processes --------------------------
+# If a previous run hung (e.g. due to Claude Code multi-instance session-state
+# contention — observed on 2026-04-11 with orphaned 5-day-old claude sessions
+# silently blocking new invocations), its claude child may still be alive.
+# Any such process older than 30 minutes is almost certainly stuck and will
+# block this run the same way. Kill it before we start.
+#
+# We match on "--agent job-search-agent" which is unique enough to avoid
+# killing unrelated claude sessions (interactive shells, Claude Cowork, etc.).
+REAPED_COUNT=0
+while IFS= read -r stale_pid; do
+  [ -z "$stale_pid" ] && continue
+  # macOS ps etimes returns elapsed seconds
+  age_s=$(ps -p "$stale_pid" -o etimes= 2>/dev/null | tr -d ' ')
+  if [ -n "$age_s" ] && [ "$age_s" -gt 1800 ]; then
+    if kill -9 "$stale_pid" 2>/dev/null; then
+      REAPED_COUNT=$((REAPED_COUNT + 1))
+      echo "Reaped stale claude PID $stale_pid (age ${age_s}s)" >> "$LOG_DIR/run-daily-reaper.log"
+    fi
+  fi
+done < <(pgrep -f "claude.*--print.*--agent job-search-agent" 2>/dev/null || true)
+
 # --- Run -------------------------------------------------------------------
 {
   echo "=== Job Search Agent Daily Run: $(date) ==="

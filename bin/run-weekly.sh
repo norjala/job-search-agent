@@ -33,6 +33,15 @@ ln -sfn "$LOG" "$LOG_DIR/latest.log"
 
 find "$LOG_DIR" -name '*.log' -type f -mtime +30 -delete 2>/dev/null || true
 
+# Reap stale job-search-agent claude processes (see run-daily.sh for rationale).
+while IFS= read -r stale_pid; do
+  [ -z "$stale_pid" ] && continue
+  age_s=$(ps -p "$stale_pid" -o etimes= 2>/dev/null | tr -d ' ')
+  if [ -n "$age_s" ] && [ "$age_s" -gt 1800 ]; then
+    kill -9 "$stale_pid" 2>/dev/null && echo "Reaped stale claude PID $stale_pid (age ${age_s}s)" >> "$LOG_DIR/run-weekly-reaper.log"
+  fi
+done < <(pgrep -f "claude.*--print.*--agent job-search-agent" 2>/dev/null || true)
+
 {
   echo "=== Job Search Agent WEEKLY Run: $(date) ==="
   echo "User: $(whoami)"
