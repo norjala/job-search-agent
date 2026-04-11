@@ -75,17 +75,22 @@ Current limit: 256
 
 Meanwhile on the morning of Apr 11, the cron daily fired at 08:00 and spawned claude — but THIS one got stuck instead of crashing. It consumed 0.02 seconds of CPU in 6h55m and was still holding process slots when the investigation started. Zombie, not dead. Removed both crontab entries and killed the zombies. Lesson: **`crontab -l` is a required check whenever a scheduled job is misbehaving** — a LaunchAgent and a cron job for the same work can silently coexist for weeks.
 
-### 2. Full daily workflow prompt hangs the agent
+### 2. Orphan `claude` processes silently block new `--agent` invocations
 
 After the runtime rebuild, the first `launchctl kickstart` of the daily agent produced claude process PID 23321 which hung for 5+ minutes with 0.01 CPU seconds of activity — stuck, not working. A follow-up test isolated the cause:
 
 - `claude --print "reply pong"` → 5 seconds, clean exit
 - `claude --print --agent job-search-agent "Reply pong, do nothing else"` → 6 seconds, clean exit
-- `claude --print --agent job-search-agent "Run your daily workflow..."` → hangs indefinitely
+- `claude --print --agent job-search-agent "Run your daily workflow..."` → hangs indefinitely (CPU ~0)
+- Focused intake-drain prompt → completed cleanly in 2.5 minutes
 
-The `--agent` path itself is fine. The full daily-workflow prompt triggers some tool invocation deadlock — probably the Role Scanner's parallel WebSearches or a sub-agent spawn. A focused alternative prompt ("FOCUSED INTAKE DRAIN: process only the 4 URLs in ## New, do NOT run Role Scanner, do NOT do broad discovery") completed cleanly in ~2.5 minutes and drained the backlog. This is a separate agent-definition bug, NOT a scheduling/runtime bug.
+At first glance this looked like a prompt-content bug (full workflow vs. narrow prompts). **Actual cause: two 5-day-old orphan `claude` processes** (PIDs 90471 and 97098) were running in forgotten zsh shells. They had been launched as interactive sessions days earlier and never quit. Once they were reaped (the earlier process cleanup during the TCC investigation killed their parent shells and they disappeared), the full daily-workflow prompt ran cleanly without any changes to the agent definition or the prompt.
 
-**Open follow-up (TODO):** Trace which step of the daily workflow deadlocks. Candidate root causes: (a) Task-tool sub-agent spawning, (b) `WebSearch` parallelism exhausting an internal pool, (c) `claude` session lock contention with long-running background claude sessions Jaron has open in tmux and other zsh shells. Until fixed, the scheduled 8 AM run will reproduce this hang — the health-check's self-heal attempt will also hang, and within ~26h `_HEALTH_ALERT.md` will be written. The repair path is the focused-intake-drain prompt or a manual narrower invocation.
+**The contention mechanism is not fully understood.** Claude Code has per-user state in `~/.claude/` (projects, history.jsonl, session DB) and presumably a lock on some of it. The observation is: when >2 long-running `claude --print --agent` sibling processes exist, new invocations consume ~0 CPU for many minutes and appear to be waiting on something. Killing the oldest frees the new one. The tmux `claude --remote-control` background session (12 days old, used for Claude Cowork) does NOT trigger this — only `--print --agent` invocations that were launched from ordinary shells.
+
+**Permanent guard**: `bin/run-daily.sh`, `bin/run-weekly.sh`, and `bin/health-check.sh` now each run a reaper at startup that `pkill -9`'s any `claude.*--print.*--agent job-search-agent` process older than 30 minutes. The pattern is narrow enough that it won't touch interactive sessions, `--remote-control` background tasks, or non-job-search agents. With this guard, even if a run hangs, the next scheduled run (8 AM daily OR health-check hourly) cleans up the stale process before starting — the hang cannot propagate across days.
+
+**Investigation TODO (low priority now)**: trace which specific file lock or IPC socket the orphan `claude` processes are holding. Plausible candidates: `~/.claude/projects/<project-slug>/sessions.db`, a SQLite file with per-project write lock. Not blocking — the reaper handles it operationally.
 
 ### 3. Long-running orphan claude processes
 
