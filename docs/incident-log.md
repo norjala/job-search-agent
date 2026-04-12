@@ -53,6 +53,31 @@ The "Apr 7–9 plist unloaded" theory from the prior incident was wrong. Re-insp
 
 ---
 
+## 2026-04-11 (late update) — the REAL TCC fix
+
+After the initial rebuild claimed success via raw SSH invocations, every `launchctl kickstart com.jaron.job-search-daily` still hung at startup with claude processes showing 0.01 CPU seconds over tens of minutes. Initially misdiagnosed as "orphan claude session contention" and "claude Code multi-instance lock." That was wrong.
+
+**Actual root cause**: `/bin/bash` (and anything it spawns, including claude and node) lacked macOS Full Disk Access when launched by `launchd`. SSH-spawned bash inherits FDA from `sshd`'s security session — which is why raw SSH tests worked and why the install.sh dry-run passed. Launchd-spawned bash runs in a different TCC context without FDA, so:
+- Reading `~/Documents/Obsidian/work/job-search/_intake.md` returned `Operation not permitted`
+- Appending to `_daily-digest.md` returned `Operation not permitted`
+- Creating new empty files (touch) and reading `~/Documents/Obsidian/.claude/agents/job-search-agent.md` happened to work — TCC is more granular than "all of ~/Documents is protected"
+- `claude --print --agent` would start, then block silently on its first vault read, and appear as 0 CPU "stuck"
+
+A minimal launchd probe plist (bash reading/writing four specific vault files, no claude involvement) reproduced the exact pattern: some reads blocked, some worked, appends to existing files always blocked.
+
+**The one-time manual fix**: grant `/bin/bash` Full Disk Access in System Settings → Privacy & Security → Full Disk Access on the Mac Mini. **This cannot be scripted** — macOS blocks programmatic TCC modification since macOS 10.14. After the grant:
+- Same probe plist: 4/4 ops succeeded
+- Full `launchctl kickstart com.jaron.job-search-daily` completed cleanly in 15:07 (matching Apr 10 baseline)
+- Digest header updated, wrapper footer written, exit code 0, no health alert
+- Found 4 new Circle PM roles and advanced 6 pipeline rows to Networking with real 2nd-order connections
+
+**Permanent operational implications**:
+1. The `bin/install.sh` preflight includes a dry-run check, but that check passes under SSH — it does NOT prove the launchd path works. The ONLY way to verify is `launchctl kickstart -k gui/$UID/com.jaron.job-search-daily` followed by watching the run-daily.sh log for exit 0.
+2. macOS updates sometimes reset FDA grants (rare — maybe once a year). When this happens, tomorrow's 8 AM run will hit the exact same pattern. Recovery: re-add /bin/bash in System Settings. The health-check canary will catch it within an hour and write `_HEALTH_ALERT.md`, and `/daily` will hard-block on it so the silent-failure-for-days pattern cannot recur.
+3. Do not trust the SSH-based dry-run alone as proof of working runtime. The real test is the launchctl path.
+
+---
+
 ## 2026-04-11 — Bonus findings surfaced during the rebuild
 
 While fixing the TCC issue, three other latent bugs surfaced. All were masking each other.

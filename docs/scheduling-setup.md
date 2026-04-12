@@ -34,18 +34,38 @@ The installer is idempotent. It boots out any existing `com.jaron.job-search-*` 
 
 Use `./bin/install.sh --repair` from the `/daily` hard-block recovery path — same effect, but skips the smoke test so the `/daily` session can continue immediately.
 
-## ⚠️ One-time manual step — grant `/bin/bash` Full Disk Access
+## ⚠️ MANDATORY one-time manual step — grant `/bin/bash` Full Disk Access
 
-**This is required for launchd-spawned scripts to read the Obsidian vault.** macOS TCC sandboxes launchd differently from interactive shells, so even a script living outside `~/Documents/` cannot read files inside the vault without this grant.
+**Without this, NOTHING runs** — launchd-spawned bash can't read `_intake.md`, can't append the digest footer, and claude will hang silently on its first vault read. This is not optional; the runtime cannot work without it.
+
+macOS TCC sandboxes launchd's security session separately from interactive shells. SSH-spawned bash inherits Full Disk Access from sshd, so SSH tests will *lie to you* — they'll pass even when the scheduled runs would fail. **Always verify with `launchctl kickstart`**, never with a manual bash invocation.
+
+### Steps (physical GUI access to the machine required — cannot be done via SSH)
 
 1. **System Settings → Privacy & Security → Full Disk Access**
-2. Click the **+** button
-3. Press **⌘⇧.** to show hidden files
-4. Navigate to **/bin/bash** and add it
-5. Confirm the toggle is on
-6. Re-run `./bin/dry-run.sh` — it should now pass
+2. Click the **+** button (unlock with password if prompted)
+3. Press **⌘⇧G** to open "Go to Folder"
+4. Type `/bin` and press Enter
+5. Select **`bash`** and click **Open**
+6. Confirm the toggle is **ON**
 
-If a macOS update silently resets this grant, the hourly `health-check.sh` will catch it within an hour and write `_HEALTH_ALERT.md` into the vault. `/daily` hard-blocks on that file.
+Optional but recommended for defense-in-depth: also add `/opt/homebrew/bin/node` (claude's runtime).
+
+### Verify
+
+```bash
+# Should complete in ~15 minutes with exit 0 and update the digest mtime
+launchctl kickstart -k gui/$UID/com.jaron.job-search-daily
+tail -f ~/Workspace/job-finder-agent/.logs/latest.log
+```
+
+If you see `Operation not permitted` in the log or the claude child has ~0 CPU after a minute, FDA is not in effect.
+
+### If macOS resets the grant (rare, ~annual)
+
+Symptoms: scheduled run hangs/fails silently, `_HEALTH_ALERT.md` appears in vault within 1-26 hours, `/daily` hard-blocks.
+
+Fix: re-add `/bin/bash` to Full Disk Access using the same steps above.
 
 ## Daily health check (60 seconds)
 
