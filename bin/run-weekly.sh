@@ -69,17 +69,18 @@ done < <(pgrep -f "claude.*--print.*--agent job-search-agent" 2>/dev/null || tru
   echo "---"
 } >> "$LOG"
 
-cd "$OBSIDIAN_VAULT" 2>> "$LOG" || {
-  echo "FATAL: cannot cd to $OBSIDIAN_VAULT — likely TCC blocking /bin/bash." >> "$LOG"
-  echo "Fix: grant /bin/bash Full Disk Access in System Settings → Privacy & Security." >> "$LOG"
-  EXIT=126
-}
+# Keep cwd at $HOME (non-TCC). See run-daily.sh for the full explanation of
+# why we must NOT cd into the vault before invoking claude.
+cd "$HOME" 2>> "$LOG"
 
 if [ "${EXIT:-0}" -eq 0 ]; then
   "$CLAUDE_BIN" \
     --print \
     --agent job-search-agent \
-    "Run your weekly workflow as described in your agent instructions. Today is $(date +%Y-%m-%d). Execute ALL steps: Daily Run Workflow (Role Scanner, Process Intake, Auto-Advance Pipeline, Follow-up Reminders, Generate Daily Digest) AND Weekly Run Workflow (Broad Discovery Search, Research Refresh for Rank 1 companies). Only surface genuinely new roles in the digest." \
+    "Your vault root (working directory for all paths in the agent instructions) is: $OBSIDIAN_VAULT
+Change into that directory first before doing any work. All relative paths in your agent definition (e.g. work/job-search/, companies/, etc.) are relative to that vault root.
+
+Run your weekly workflow as described in your agent instructions. Today is $(date +%Y-%m-%d). Execute ALL steps: Daily Run Workflow (Role Scanner, Process Intake, Auto-Advance Pipeline, Follow-up Reminders, Generate Daily Digest) AND Weekly Run Workflow (Broad Discovery Search, Research Refresh for Rank 1 companies). Only surface genuinely new roles in the digest." \
     >> "$LOG" 2>&1
   EXIT=$?
 fi

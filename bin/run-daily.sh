@@ -112,17 +112,26 @@ done < <(pgrep -f "claude.*--print.*--agent job-search-agent" 2>/dev/null || tru
   echo "---"
 } >> "$LOG"
 
-cd "$OBSIDIAN_VAULT" 2>> "$LOG" || {
-  echo "FATAL: cannot cd to $OBSIDIAN_VAULT — likely TCC blocking /bin/bash." >> "$LOG"
-  echo "Fix: grant /bin/bash Full Disk Access in System Settings → Privacy & Security." >> "$LOG"
-  EXIT=126
-}
+# CRITICAL: Do NOT cd into the vault. Claude's startup calls getcwd(), and if
+# cwd is inside ~/Documents/ (TCC-protected), the getcwd() blocks indefinitely
+# when the claude binary lacks Full Disk Access. /bin/bash has FDA (manually
+# granted), but claude's binary is separate AND auto-updates to a new path on
+# every version bump, invalidating any per-binary FDA grant.
+#
+# Instead, keep cwd at $HOME (non-TCC) and tell the agent the vault path in the
+# prompt. Claude's tool calls (Read, Write, Bash) go through /bin/bash which
+# HAS FDA, so vault file access works transparently. Only claude's own startup
+# getcwd() is the problem, and we solve it by not being in a TCC directory.
+cd "$HOME" 2>> "$LOG"
 
 if [ "${EXIT:-0}" -eq 0 ]; then
   "$CLAUDE_BIN" \
     --print \
     --agent job-search-agent \
-    "Run your daily workflow as described in your agent instructions. Today is $(date +%Y-%m-%d). Execute all daily steps: Role Scanner, Process Intake, Auto-Advance Pipeline, Follow-up Reminders, Generate Daily Digest. Only surface genuinely new roles in the digest." \
+    "Your vault root (working directory for all paths in the agent instructions) is: $OBSIDIAN_VAULT
+Change into that directory first before doing any work. All relative paths in your agent definition (e.g. work/job-search/, companies/, etc.) are relative to that vault root.
+
+Run your daily workflow as described in your agent instructions. Today is $(date +%Y-%m-%d). Execute all daily steps: Role Scanner, Process Intake, Auto-Advance Pipeline, Follow-up Reminders, Generate Daily Digest. Only surface genuinely new roles in the digest." \
     >> "$LOG" 2>&1
   EXIT=$?
 fi
