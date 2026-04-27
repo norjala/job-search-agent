@@ -4,7 +4,59 @@ This is the manual checklist for the things only you can do (browser auth
 flows, GitHub PAT creation, secrets entry). Once these are done, the
 GitHub Actions workflows will run on schedule with no further intervention.
 
-**Estimated time: 15 minutes total.**
+**Estimated time: 20 minutes total.**
+
+---
+
+## Step 0 — Push current vault state from MBP to GitHub master (3 min)
+
+The `norjala/obsidian` repo is **8+ days behind** real vault state (last
+push: Apr 19). The cloud workflows would clone an outdated vault. Push
+from the MBP first so CI sees the agent prompt updates and current pipeline.
+
+On the **MacBook Pro**:
+
+```bash
+cd ~/Documents/Obsidian
+# Pull anything sitting on GitHub first (in case anything was pushed without
+# the local catching up):
+git fetch origin master
+git status                      # confirm clean working tree
+git diff origin/master..HEAD    # peek at what's about to ship
+# If status shows changes, stage and commit them — Obsidian Sync should have
+# brought over the recent agent prompt edits made on the Mac Mini today:
+git add -A
+git commit -m "Sync vault from Mac Mini, including cloud-aware agent prompt"
+git push origin master
+```
+
+After this: GitHub master matches MBP, which matches Mac Mini (via
+Obsidian Sync). Once you've pushed, ping me to finalize the Mac Mini git
+working tree (Step 0.5) so future CI commits propagate back automatically.
+
+---
+
+## Step 0.5 — (Claude does this) Set up Mac Mini's vault as a git working tree
+
+Once Step 0 is done, I'll run on the Mac Mini:
+
+```bash
+cd ~/Documents/Obsidian
+git init -b master
+git remote add origin https://github.com/norjala/obsidian.git
+git fetch origin master
+git reset --hard origin/master   # safe: working tree already matches via Obsidian Sync
+launchctl bootstrap gui/$UID ~/Workspace/job-finder-agent/launchd/com.jaron.vault-pull.plist
+```
+
+This installs a tiny launchd job (`com.jaron.vault-pull`) that runs every
+30 min and does `git pull --rebase --autostash` in the vault. CI commits
+(daily digest, intake, company folders) land on Mac Mini within ≤30 min,
+then propagate to MBP via Obsidian Sync. No manual intervention.
+
+The vault-pull job is *not* like the original agent launchd setup — it's a
+1-second git-pull, not a multi-hour Claude run, so the failure modes that
+killed the old setup don't apply here.
 
 ---
 

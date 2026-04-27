@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jaron.vault-pull</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/jaron/Workspace/job-finder-agent/bin/vault-pull.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VAULT_DIR</key>
+    <string>/Users/jaron/Documents/Obsidian</string>
+    <key>HOME</key>
+    <string>/Users/jaron</string>
+    <!-- PATH must include /opt/homebrew/bin so the gh credential helper
+         (configured globally via `gh auth setup-git`) is resolvable. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- Pull every 30 minutes. Best-effort; if it skips or fails, the next
+       tick covers it. The watchdog GH Actions workflow alerts on staleness
+       independently. -->
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <!-- StandardOut/Err to /tmp so they're easy to inspect with `cat`.
+       The script also logs via its own LOG file at .logs/vault-pull.log. -->
+  <key>StandardOutPath</key>
+  <string>/tmp/vault-pull-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/vault-pull-launchd.err</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
