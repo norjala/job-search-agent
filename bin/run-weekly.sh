@@ -10,6 +10,14 @@ OBSIDIAN_VAULT="${OBSIDIAN_VAULT:-$HOME/Documents/Obsidian}"
 JOB_SEARCH_DIR="$OBSIDIAN_VAULT/work/job-search"
 DIGEST_FILE="${DIGEST_FILE:-$JOB_SEARCH_DIR/_daily-digest.md}"
 
+# --- Cloud-cutover guard ---------------------------------------------------
+# See bin/run-daily.sh for full explanation. During the cloud soak, if today's
+# cloud weekly run already wrote its footer, exit silently to avoid double-runs.
+TODAY="$(date +%Y-%m-%d)"
+if [ -r "$DIGEST_FILE" ] && grep -q "^_Run footer: weekly finished at ${TODAY}" "$DIGEST_FILE" 2>/dev/null; then
+  exit 0
+fi
+
 if [ -z "${CLAUDE_BIN:-}" ]; then
   if command -v claude &>/dev/null; then
     CLAUDE_BIN="$(command -v claude)"
