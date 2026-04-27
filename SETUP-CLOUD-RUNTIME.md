@@ -8,55 +8,62 @@ GitHub Actions workflows will run on schedule with no further intervention.
 
 ---
 
-## Step 0 — Push current vault state from MBP to GitHub master (3 min)
+## Step 0 — Seed GitHub master with current vault state (3 min)
 
-The `norjala/obsidian` repo is **8+ days behind** real vault state (last
-push: Apr 19). The cloud workflows would clone an outdated vault. Push
-from the MBP first so CI sees the agent prompt updates and current pipeline.
+The cloud workflows clone `norjala/obsidian`, so GitHub master needs to
+match real vault state before the first run.
 
-On the **MacBook Pro**:
+Push from whichever machine has the vault git-tracked (typically MBP):
 
 ```bash
 cd ~/Documents/Obsidian
-# Pull anything sitting on GitHub first (in case anything was pushed without
-# the local catching up):
 git fetch origin master
 git status                      # confirm clean working tree
-git diff origin/master..HEAD    # peek at what's about to ship
-# If status shows changes, stage and commit them — Obsidian Sync should have
-# brought over the recent agent prompt edits made on the Mac Mini today:
 git add -A
-git commit -m "Sync vault from Mac Mini, including cloud-aware agent prompt"
+git commit -m "Sync vault: current agent definition + recent state"
 git push origin master
 ```
 
-After this: GitHub master matches MBP, which matches Mac Mini (via
-Obsidian Sync). Once you've pushed, ping me to finalize the Mac Mini git
-working tree (Step 0.5) so future CI commits propagate back automatically.
+**Heads-up about hidden directories:** Obsidian Sync does not propagate
+hidden dirs (anything starting with `.`, including `.claude/`). So your
+`.claude/agents/job-search-agent.md` may differ between Mac Mini and
+MBP. Whichever machine you push from is the version CI will use. If the
+production agent lives only on the Mac Mini, either copy that file to
+your git-tracking machine before committing, or use a one-shot
+`gh api PUT` to update just that file on GitHub master.
 
 ---
 
-## Step 0.5 — (Claude does this) Set up Mac Mini's vault as a git working tree
+## (Deferred) Mac Mini git working tree + autonomous pull
 
-Once Step 0 is done, I'll run on the Mac Mini:
+Once CI has soaked for a few clean runs, you may want to git-track the
+vault on Mac Mini too so CI commits land there autonomously (rather
+than requiring a `git pull` on MBP). The artifacts are already in this
+repo:
+
+- `bin/vault-pull.sh` — `git pull --rebase --autostash` script
+- `launchd/com.jaron.vault-pull.plist` — every-30-min launchd job
+
+To bootstrap (later, after deciding it's time):
 
 ```bash
 cd ~/Documents/Obsidian
 git init -b master
 git remote add origin https://github.com/norjala/obsidian.git
 git fetch origin master
-git reset --hard origin/master   # safe: working tree already matches via Obsidian Sync
+git reset --mixed origin/master                # safe: doesn't touch working tree
+git status                                     # inspect divergence first
+# Resolve any divergence carefully, then:
 launchctl bootstrap gui/$UID ~/Workspace/job-finder-agent/launchd/com.jaron.vault-pull.plist
 ```
 
-This installs a tiny launchd job (`com.jaron.vault-pull`) that runs every
-30 min and does `git pull --rebase --autostash` in the vault. CI commits
-(daily digest, intake, company folders) land on Mac Mini within ≤30 min,
-then propagate to MBP via Obsidian Sync. No manual intervention.
-
 The vault-pull job is *not* like the original agent launchd setup — it's a
-1-second git-pull, not a multi-hour Claude run, so the failure modes that
-killed the old setup don't apply here.
+1-second network operation, not a multi-hour Claude run, so the failure
+modes that killed the old setup don't apply here.
+
+Until this step happens, CI commits land on GitHub but reach your local
+Obsidian only when you `git pull` on MBP (then Obsidian Sync propagates
+to Mac Mini).
 
 ---
 
