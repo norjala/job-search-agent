@@ -21,6 +21,19 @@ OBSIDIAN_VAULT="${OBSIDIAN_VAULT:-$HOME/Documents/Obsidian}"
 JOB_SEARCH_DIR="$OBSIDIAN_VAULT/work/job-search"
 DIGEST_FILE="${DIGEST_FILE:-$JOB_SEARCH_DIR/_daily-digest.md}"
 
+# --- Cloud-cutover guard ---------------------------------------------------
+# During the GitHub Actions soak period (see docs/cloud-runtime.md), the cloud
+# daily runs at 07:00 PT — earlier than this wrapper's 08:00 PT trigger. A
+# successful cloud run writes a "_Run footer: daily finished at <today>..."
+# line in the digest. If that footer is present, the cloud already covered
+# today's work — exit silently to avoid double-runs and duplicate commits.
+# If the cloud run failed, no footer is present and this wrapper proceeds
+# as the fallback. Remove this block once the Mac Mini setup is fully retired.
+TODAY="$(date +%Y-%m-%d)"
+if [ -r "$DIGEST_FILE" ] && grep -q "^_Run footer: daily finished at ${TODAY}" "$DIGEST_FILE" 2>/dev/null; then
+  exit 0
+fi
+
 # Auto-detect claude binary — try PATH, then common install locations.
 if [ -z "${CLAUDE_BIN:-}" ]; then
   if command -v claude &>/dev/null; then

@@ -1,0 +1,113 @@
+name: Watchdog
+
+# Independent staleness check. Runs every 4h, fetches the vault, and
+# checks how long it's been since the daily digest was last touched
+# (per git log, not filesystem mtime — git log is the durable signal).
+# If staler than 26h, writes _HEALTH_ALERT.md + Discord ping.
+#
+# This replaces the old health-check.sh on the Mac Mini, but cannot
+# self-trap on a "running process" because runs are bounded by the
+# 5-minute timeout-minutes below.
+
+on:
+  schedule:
+    - cron: "0 */4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: job-search-watchdog
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout vault as workspace
+        uses: actions/checkout@v4
+        with:
+          repository: norjala/obsidian
+          token: ${{ secrets.VAULT_PAT }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Check digest staleness
+        id: stale
+        run: |
+          DIGEST="work/job-search/_daily-digest.md"
+          if [ ! -f "$DIGEST" ]; then
+            echo "Digest not found at $DIGEST"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "age_hours=99999" >> "$GITHUB_OUTPUT"
+            echo "reason=missing-file" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last_commit_ts=$(git log -1 --format=%ct -- "$DIGEST" || echo 0)
+          now_ts=$(date +%s)
+          age_seconds=$(( now_ts - last_commit_ts ))
+          age_hours=$(( age_seconds / 3600 ))
+          echo "Digest last touched ${age_hours}h ago (commit ts $last_commit_ts, now $now_ts)."
+          echo "age_hours=$age_hours" >> "$GITHUB_OUTPUT"
+          if [ "$age_seconds" -gt 93600 ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            echo "reason=stale" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write health alert when stale
+        if: steps.stale.outputs.stale == 'true'
+        env:
+          AGE: ${{ steps.stale.outputs.age_hours }}
+          REASON: ${{ steps.stale.outputs.reason }}
+        run: |
+          mkdir -p work/job-search
+          cat > work/job-search/_HEALTH_ALERT.md <<EOF
+          # 🚨 Health Alert — digest stale
+
+          The watchdog detected the daily digest is stale (age: ${AGE}h, reason: ${REASON}).
+
+          - Workflow: \`watchdog.yml\`
+          - Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - Last successful daily/weekly run wrote the digest more than 26 hours ago.
+
+          Likely causes:
+          1. Daily/weekly cron got skipped by GH Actions (best-effort scheduling).
+          2. The agent ran but failed to commit (check daily.yml run logs).
+          3. The vault PAT expired or lost permissions.
+
+          To recover: \`gh workflow run daily.yml --repo norjala/job-search-agent\`,
+          tail with \`gh run watch\`, then verify the digest mtime advances.
+          EOF
+          git config user.name "job-finder-agent[bot]"
+          git config user.email "job-finder-agent@users.noreply.github.com"
+          git add work/job-search/_HEALTH_ALERT.md
+          if git diff --cached --quiet; then
+            echo "Health alert already current; nothing to commit."
+            exit 0
+          fi
+          git commit -m "Watchdog: digest stale (${AGE}h)"
+          git pull --rebase
+          git push
+
+      - name: Notify Discord when stale
+        if: steps.stale.outputs.stale == 'true'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          AGE: ${{ steps.stale.outputs.age_hours }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            echo "DISCORD_WEBHOOK not set; skipping notification."
+            exit 0
+          fi
+          payload=$(jq -n \
+            --arg age "$AGE" \
+            --arg url "$RUN_URL" \
+            '{content: ("⏰ job-finder-agent watchdog: digest is **" + $age + "h** stale. " + $url)}')
+          curl -fsS -X POST "$DISCORD_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "$payload"

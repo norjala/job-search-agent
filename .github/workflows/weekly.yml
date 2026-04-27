@@ -1,0 +1,98 @@
+name: Weekly Run
+
+# Runs the job-search agent's weekly workflow (Monday).
+# Weekly = daily + broad discovery + Rank-1 research refresh.
+# See agent definition (canonical: vault/.claude/agents/job-search-agent.md)
+# and docs/cloud-runtime.md for context.
+#
+# Schedule: Monday 13:00 UTC = 06:00 PT during DST, 05:00 PT during PST.
+
+on:
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+    inputs:
+      prompt_override:
+        description: "Optional override for the agent prompt"
+        required: false
+        default: ""
+
+concurrency:
+  group: job-search-weekly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout vault as workspace
+        uses: actions/checkout@v4
+        with:
+          repository: norjala/obsidian
+          token: ${{ secrets.VAULT_PAT }}
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Clear stale health alert
+        run: rm -f work/job-search/_HEALTH_ALERT.md
+
+      - name: Run agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          prompt: ${{ inputs.prompt_override != '' && inputs.prompt_override || 'It is Monday. Run your weekly workflow, which is the daily workflow PLUS broad discovery search and research refresh for Rank-1 companies. The vault root is the current working directory; treat all paths as relative to cwd.' }}
+          claude_args: "--agent job-search-agent --max-turns 150 --model claude-opus-4-7"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+      - name: Commit and push vault changes
+        if: success()
+        run: |
+          git config user.name "job-finder-agent[bot]"
+          git config user.email "job-finder-agent@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No vault changes to commit."
+            exit 0
+          fi
+          git commit -m "Weekly run $(date -u +%F)"
+          git pull --rebase
+          git push
+
+      - name: Write health alert on failure
+        if: failure()
+        run: |
+          mkdir -p work/job-search
+          cat > work/job-search/_HEALTH_ALERT.md <<EOF
+          # 🚨 Health Alert
+
+          Cloud **weekly** run failed at $(date -u).
+
+          - Workflow: \`weekly.yml\`
+          - Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Inspect the GitHub Actions logs and fix before the next scheduled run.
+          EOF
+          git config user.name "job-finder-agent[bot]"
+          git config user.email "job-finder-agent@users.noreply.github.com"
+          git add work/job-search/_HEALTH_ALERT.md
+          git commit -m "Health alert: weekly run failed"
+          git pull --rebase
+          git push
+
+      - name: Notify Discord on failure
+        if: failure()
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            echo "DISCORD_WEBHOOK not set; skipping Discord notification."
+            exit 0
+          fi
+          payload=$(jq -n --arg url "$RUN_URL" '{content: ("🚨 job-finder-agent **weekly** run failed: " + $url)}')
+          curl -fsS -X POST "$DISCORD_WEBHOOK" \
+            -H 'Content-Type: application/json' \
+            -d "$payload"

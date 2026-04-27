@@ -7,6 +7,12 @@
 
 **An AI agent that automates your job search while you sleep.**
 
+> **Runtime status (Apr 2026): cloud-first.** The recommended runtime is now
+> GitHub Actions cron + `anthropics/claude-code-action@v1`, with the agent
+> definition living in your private vault and a watchdog workflow catching
+> staleness. The original macOS LaunchAgent setup is preserved as a fallback.
+> See [`docs/cloud-runtime.md`](docs/cloud-runtime.md) for the operating manual.
+
 ---
 
 ## What It Does
@@ -86,9 +92,12 @@ The scheduler will take over from there, running nightly and dropping a digest i
 
 ## Documentation
 
+- [Cloud Runtime](docs/cloud-runtime.md) — recommended GitHub Actions setup (secrets, workflows, cutover, debugging)
 - [How to Use](docs/how-to-use.md) — detailed walkthrough from intake to offer
 - [Architecture](docs/architecture.md) — folder structure, agent loop, file conventions
 - [Customization](docs/customization.md) — adapting filters, prompts, and scheduling to your workflow
+- [Lessons Learned](docs/lessons-learned.md) — hard-won knowledge from three multi-day outages on the original launchd setup
+- [Incident Log](docs/incident-log.md) — chronological record of failures and root causes
 
 ---
 

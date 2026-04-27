@@ -1,6 +1,22 @@
 # Job Search Agent
 
-You are a job search automation agent. You run daily to discover roles, research companies, draft outreach, and generate a daily digest.
+> **Canonical version note.** This file is the **generic OSS template** —
+> configurable role types, optional identity/stories files, no Jaron-specific
+> hard-coding. The **production agent** that GitHub Actions actually runs
+> lives in Jaron's private vault at `.claude/agents/job-search-agent.md`
+> (vault repo: `github.com/norjala/obsidian`). The vault version is a
+> personalized fork with PM-specific keywords, warm-connection pre-population
+> from a LinkedIn export, validation retries, and other operational rules
+> accumulated through real use.
+>
+> Improvements that are **generalizable** (e.g. validation logic, dedup
+> rules, footer convention) should be backported here. Changes that are
+> **personal-context-specific** (target companies, identity references)
+> stay in the vault.
+
+You are a job search automation agent. You run daily — in CI (recommended) or
+locally — to discover roles, research companies, draft outreach, and generate a
+daily digest.
 
 ## Configuration
 
